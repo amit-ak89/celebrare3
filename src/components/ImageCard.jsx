@@ -1,84 +1,47 @@
-import { useState, useCallback, useRef } from 'react';
-import { applyWatermark } from '../utils/watermark';
+import { useState } from 'react';
 
 /**
- * ImageCard component
+ * ImageCard — single image cell rendered inside the react-window Grid.
  *
- * Displays a single image item within the virtualized grid.
- * Responsibilities:
- * - Render the thumbnail
- * - Render a loading spinner while the image loads
- * - Show an error state if the image fails to load
- * - Expose a checkbox for selection
- * - Expose a download button that triggers off-thread watermarking
+ * Kept lightweight so react-window can recycle it efficiently.
+ * Heavy work (watermark + download) is handled by the parent via onDownload.
  */
-export default function ImageCard({
-  item,
-  isSelected,
-  onToggleSelect,
-  onImageClick,
-  onDownload,
-  style,
-}) {
-  const [imgLoaded, setImgLoaded] = useState(false);
-  const [imgError, setImgError] = useState(false);
+export default function ImageCard({ item, isSelected, onToggleSelect, onImageClick, onDownload }) {
+  const [loaded, setLoaded] = useState(false);
+  const [error,  setError]  = useState(false);
 
   return (
-    <div
-      className="image-card"
-      style={{
-        ...style,
-        padding: '8px',
-        boxSizing: 'border-box',
-      }}
-    >
-      <div className="card-inner">
-        <div className="checkbox-wrap">
-          <input
-            type="checkbox"
-            checked={isSelected}
-            onChange={() => onToggleSelect(item.id)}
-            title="Toggle selection"
+    <div className="card-inner">
+      <div className="checkbox-wrap">
+        <input
+          type="checkbox"
+          checked={isSelected}
+          onChange={() => onToggleSelect(item.id)}
+          aria-label="Select image"
+        />
+      </div>
+
+      <div className="image-wrap" onClick={() => onImageClick(item)}>
+        {!loaded && !error && <div className="image-placeholder"><span>Loading…</span></div>}
+        {error ? (
+          <div className="image-error">Failed to load</div>
+        ) : (
+          <img
+            src={item.thumbnailUrl}
+            alt={item.author}
+            loading="lazy"
+            onLoad={() => setLoaded(true)}
+            onError={() => setError(true)}
+            style={{ display: loaded ? 'block' : 'none' }}
           />
-        </div>
+        )}
+      </div>
 
-        <div className="image-wrap" onClick={() => onImageClick(item)}>
-          {!imgLoaded && !imgError && (
-            <div className="image-placeholder">
-              <span>Loading...</span>
-            </div>
-          )}
-
-          {imgError ? (
-            <div className="image-error">Failed to load image</div>
-          ) : (
-            <img
-              src={item.thumbnailUrl}
-              alt={item.title}
-              loading="lazy"
-              onLoad={() => setImgLoaded(true)}
-              onError={() => setImgError(true)}
-              style={{
-                display: imgLoaded ? 'block' : 'none',
-                width: '100%',
-                height: '220px',
-                objectFit: 'cover',
-                borderRadius: '6px',
-                cursor: 'pointer',
-              }}
-            />
-          )}
-        </div>
-
-        <div className="card-actions">
-          <button
-            className="download-btn"
-            onClick={() => onDownload(item)}
-            title="Download watermarked image"
-          >
-            Download
-          </button>
-        </div>
+      <div className="card-actions">
+        <span className="card-author">{item.author}</span>
+        <button className="download-btn" onClick={() => onDownload(item)}>
+          ↓ Download
+        </button>
       </div>
     </div>
   );

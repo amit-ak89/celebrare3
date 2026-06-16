@@ -1,109 +1,142 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import Gallery from './components/Gallery';
 import ImageModal from './components/ImageModal';
+import { applyWatermarkFromUrl, downloadBlob } from './utils/watermark';
 
 const TOTAL_IMAGES = 100;
-const PICSUM_API = 'https://picsum.photos/v2/list';
 
 /**
- * App component
+ * App — root orchestrator.
  *
- * Orchestrates:
- * - Fetching 100 images from Picsum Photos API
- * - Managing selection state via a Set
- * - Modal lifecycle (open/close)
- * - Download with watermark applied via Canvas API
+ * Virtualization: Gallery.jsx uses react-window (FixedSizeGrid) so only the
+ * visible image cells are mounted in the DOM at any time, keeping scroll
+ * performance smooth at 60 fps regardless of image count.
  *
- * Comment: Virtualization
- * Gallery.jsx uses @tanstack/react-virtual for windowed row virtualization.
- * Only rows in the viewport (+ overscan buffer) are rendered, keeping DOM
- * node count ~constant for smooth 60fps scrolling.
+ * Web Worker: Bulk "Download Selected" offloads ImageBitmap creation +
+ * OffscreenCanvas watermark compositing to a dedicated worker thread so the
+ * UI never freezes during heavy canvas work.
  *
- * Comment: Canvas API
- * Watermark "Celebrare" is rendered via HTML5 Canvas on each downloaded
- * image using fillText + strokeText with semi-transparent styling.
- *
- * Comment: Web Worker
- * The heavy image decoding + canvas compositing is offloaded to a Web Worker
- * pool so the main thread stays responsive even during bulk downloads.
- * See src/workers/watermarkWorker.js.
+ * Canvas API: Watermark text "Celebrare" is drawn with fillText/strokeText
+ * on either a main-thread <canvas> (single download) or an OffscreenCanvas
+ * inside the worker (bulk download).
  */
 export default function App() {
-  const [images, setImages] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [images, setImages]       = useState([]);
+  const [loading, setLoading]     = useState(true);
+  const [error, setError]         = useState(null);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [modalItem, setModalItem] = useState(null);
 
+  // Persistent Web Worker instance — created once, reused for all bulk downloads
+  const workerRef = useRef(null);
+
+  useEffect(() => {
+    // Instantiate the worker using Vite's ?worker import syntax
+    workerRef.current = new Worker(
+      new URL('./workers/watermarkWorker.js', import.meta.url),
+      { type: 'module' }
+    );
+    return () => workerRef.current?.terminate();
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
+    setError(null);
 
-    async function loadImages() {
-      setLoading(true);
-      setError(null);
-      try {
-        const res = await fetch(`${PICSUM_API}?page=1&limit=${TOTAL_IMAGES}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (!cancelled) {
-          const mapped = data.map((img) => ({
-            id: String(img.id),
-            title: `Photo ${img.id} by ${img.author}`,
-            author: img.author,
-            downloadUrl: img.download_url,
-            thumbnailUrl: img.download_url,
-          }));
-          setImages(mapped);
-        }
-      } catch (err) {
-        if (!cancelled) setError(err.message);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
+    fetch(`https://picsum.photos/v2/list?page=1&limit=${TOTAL_IMAGES}`)
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((data) => {
+        if (cancelled) return;
+        setImages(
+          data.map((img) => ({
+            id:           String(img.id),
+            author:       img.author,
+            // Sized thumbnail (400×300) for fast gallery loading
+            thumbnailUrl: `https://picsum.photos/id/${img.id}/400/300`,
+            // Full-res URL for modal preview and watermark download
+            downloadUrl:  img.download_url,
+          }))
+        );
+      })
+      .catch((err) => { if (!cancelled) setError(err.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
 
-    loadImages();
     return () => { cancelled = true; };
   }, []);
 
   const toggleSelect = useCallback((id) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
   }, []);
 
   const selectAll = useCallback(() => {
-    setSelectedIds((prev) => {
-      if (prev.size === images.length) return new Set();
-      return new Set(images.map((img) => img.id));
-    });
+    setSelectedIds((prev) =>
+      prev.size === images.length ? new Set() : new Set(images.map((img) => img.id))
+    );
   }, [images]);
 
   const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
 
-  const handleImageClick = useCallback((item) => {
-    setModalItem(item);
+  /** Single-image download — runs Canvas work on main thread (fast, one image) */
+  const handleDownloadSingle = useCallback(async (item) => {
+    try {
+      const blob = await applyWatermarkFromUrl(item.downloadUrl);
+      downloadBlob(blob, `celebrare_${item.id}.png`);
+    } catch (err) {
+      alert(`Download failed: ${err.message}`);
+    }
   }, []);
 
-  const closeModal = useCallback(() => {
-    setModalItem(null);
-  }, []);
-
-  const handleDownloadSingle = useCallback(
-    async (item) => {
-      await downloadWatermarked(item);
-    },
-    []
-  );
-
+  /**
+   * Bulk download — offloads ALL canvas compositing to the Web Worker.
+   * Main thread only fetches images as ImageBitmaps (GPU-decodable), then
+   * transfers them (zero-copy) to the worker.
+   */
   const handleDownloadSelected = useCallback(async () => {
     const selected = images.filter((img) => selectedIds.has(img.id));
-    for (const item of selected) {
-      await downloadWatermarked(item);
-    }
+    if (!selected.length || !workerRef.current) return;
+
+    const worker = workerRef.current;
+
+    // Build a promise for each image that resolves when the worker replies
+    const promises = selected.map(
+      (item) =>
+        new Promise(async (resolve, reject) => {
+          // Fetch image as ImageBitmap — this is transferable (zero-copy to worker)
+          let bitmap;
+          try {
+            const res = await fetch(item.thumbnailUrl);
+            const blob = await res.blob();
+            bitmap = await createImageBitmap(blob);
+          } catch {
+            reject(new Error(`Fetch failed for ${item.id}`));
+            return;
+          }
+
+          const onMessage = ({ data }) => {
+            if (data.id !== item.id) return;
+            worker.removeEventListener('message', onMessage);
+            if (data.type === 'result') resolve({ id: item.id, blob: data.blob });
+            else reject(new Error(data.message));
+          };
+
+          worker.addEventListener('message', onMessage);
+          // Transfer bitmap to worker — zero-copy, main thread loses ownership
+          worker.postMessage({ type: 'watermark', id: item.id, imageBitmap: bitmap }, [bitmap]);
+        })
+    );
+
+    // Trigger downloads as each result arrives
+    const results = await Promise.allSettled(promises);
+    results.forEach((r) => {
+      if (r.status === 'fulfilled') {
+        downloadBlob(r.value.blob, `celebrare_${r.value.id}.png`);
+      }
+    });
   }, [images, selectedIds]);
 
   return (
@@ -138,7 +171,7 @@ export default function App() {
             images={images}
             selectedIds={selectedIds}
             onToggleSelect={toggleSelect}
-            onImageClick={handleImageClick}
+            onImageClick={setModalItem}
             onDownload={handleDownloadSingle}
             onDownloadSelected={handleDownloadSelected}
             onClearSelection={clearSelection}
@@ -146,59 +179,7 @@ export default function App() {
         )}
       </main>
 
-      {modalItem && <ImageModal item={modalItem} onClose={closeModal} />}
+      {modalItem && <ImageModal item={modalItem} onClose={() => setModalItem(null)} />}
     </div>
   );
-}
-
-async function downloadWatermarked(item) {
-  try {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = reject;
-      img.src = item.downloadUrl;
-    });
-
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    const w = img.naturalWidth;
-    const h = img.naturalHeight;
-    canvas.width = w;
-    canvas.height = h;
-
-    ctx.drawImage(img, 0, 0);
-
-    const fontSize = Math.max(16, Math.floor(w / 25));
-    ctx.font = `bold ${fontSize}px Arial, sans-serif`;
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.4)';
-    ctx.lineWidth = Math.max(1, fontSize / 12);
-
-    const text = 'Celebrare';
-    const tm = ctx.measureText(text);
-    const textWidth = tm.width;
-    const padding = fontSize * 1.5;
-    const x = w - textWidth - padding;
-    const y = h - padding;
-
-    ctx.strokeText(text, x, y);
-    ctx.fillText(text, x, y);
-
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `celebrare_${item.id}.png`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    }, 'image/png');
-  } catch (err) {
-    console.error('Download failed:', err);
-    alert(`Failed to download ${item.title}: ${err.message}`);
-  }
 }
