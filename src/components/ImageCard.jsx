@@ -29,10 +29,9 @@ export default function ImageCard({ item, isSelected, onToggleSelect, onImageCli
           <img
             src={item.thumbnailUrl}
             alt={item.author}
-            loading="lazy"
             onLoad={() => setLoaded(true)}
             onError={() => setError(true)}
-            style={{ display: loaded ? 'block' : 'none' }}
+            style={{ opacity: loaded ? 1 : 0, width: '100%', height: '100%', objectFit: 'cover', position: loaded ? 'relative' : 'absolute' }}
           />
         )}
       </div>

@@ -103,32 +103,24 @@ export default function App() {
     const worker = workerRef.current;
 
     // Build a promise for each image that resolves when the worker replies
-    const promises = selected.map(
-      (item) =>
-        new Promise(async (resolve, reject) => {
-          // Fetch image as ImageBitmap — this is transferable (zero-copy to worker)
-          let bitmap;
-          try {
-            const res = await fetch(item.thumbnailUrl);
-            const blob = await res.blob();
-            bitmap = await createImageBitmap(blob);
-          } catch {
-            reject(new Error(`Fetch failed for ${item.id}`));
-            return;
-          }
+    const promises = selected.map(async (item) => {
+      // Fetch + decode image as a transferable ImageBitmap (zero-copy to worker)
+      const res    = await fetch(item.thumbnailUrl);
+      const blob   = await res.blob();
+      const bitmap = await createImageBitmap(blob);
 
-          const onMessage = ({ data }) => {
-            if (data.id !== item.id) return;
-            worker.removeEventListener('message', onMessage);
-            if (data.type === 'result') resolve({ id: item.id, blob: data.blob });
-            else reject(new Error(data.message));
-          };
-
-          worker.addEventListener('message', onMessage);
-          // Transfer bitmap to worker — zero-copy, main thread loses ownership
-          worker.postMessage({ type: 'watermark', id: item.id, imageBitmap: bitmap }, [bitmap]);
-        })
-    );
+      return new Promise((resolve, reject) => {
+        const onMessage = ({ data }) => {
+          if (data.id !== item.id) return;
+          worker.removeEventListener('message', onMessage);
+          if (data.type === 'result') resolve({ id: item.id, blob: data.blob });
+          else reject(new Error(data.message));
+        };
+        worker.addEventListener('message', onMessage);
+        // Transfer bitmap — zero-copy, main thread relinquishes ownership
+        worker.postMessage({ type: 'watermark', id: item.id, imageBitmap: bitmap }, [bitmap]);
+      });
+    });
 
     // Trigger downloads as each result arrives
     const results = await Promise.allSettled(promises);

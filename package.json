@@ -9,7 +9,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@tanstack/react-virtual": "^3.14.3",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "react-virtualized-auto-sizer": "^2.0.3",

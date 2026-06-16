@@ -1,24 +1,33 @@
-import { useState, memo, useCallback } from 'react';
+import { useState, useEffect, useRef, memo } from 'react';
 import { Grid } from 'react-window';
-import { AutoSizer } from 'react-virtualized-auto-sizer';
 import ImageCard from './ImageCard';
 import BottomTray from './BottomTray';
 
 /**
- * Gallery — virtualized image grid using react-window Grid.
+ * Gallery — virtualized image grid using react-window v2 Grid.
  *
- * Virtualization: react-window's Grid renders only the cells visible in the
- * viewport plus a small overscan buffer. For 100+ images this keeps the DOM
- * count ~constant (~20-30 nodes) regardless of total count — smooth 60 fps.
+ * Virtualization: react-window Grid renders only cells visible in the
+ * viewport (+ overscan). DOM node count stays ~constant for 100+ images,
+ * keeping scroll at smooth 60 fps.
+ *
+ * react-window v2 API differences from v1:
+ *  - cellComponent prop instead of children render prop
+ *  - cellProps are spread directly onto the cell component (no `data` wrapper)
+ *  - Grid sizes itself via CSS (overflow:auto, flexGrow:1) — no width/height props
+ *  - overscanCount instead of overscanRowCount
  */
 
 const CARD_HEIGHT      = 320;
 const MIN_COLUMN_WIDTH = 260;
-const OVERSCAN         = 2;
 
-/** Memoized cell — only re-renders when its own props change */
-const Cell = memo(function Cell({ columnIndex, rowIndex, style, data }) {
-  const { images, columns, selectedIds, onToggleSelect, onImageClick, onDownload } = data;
+/**
+ * Cell component — receives columnIndex, rowIndex, style, and all cellProps
+ * spread directly by react-window v2.
+ */
+const Cell = memo(function Cell({
+  columnIndex, rowIndex, style,
+  images, columns, selectedIds, onToggleSelect, onImageClick, onDownload,
+}) {
   const index = rowIndex * columns + columnIndex;
   if (index >= images.length) return <div style={style} />;
 
@@ -40,8 +49,29 @@ export default function Gallery({
   images, selectedIds, onToggleSelect, onImageClick, onDownload,
   onDownloadSelected, onClearSelection,
 }) {
-  // Track columns so rowCount stays in sync; updated inside AutoSizer render
-  const [columns, setColumns] = useState(3);
+  const containerRef = useRef(null);
+  const [columns, setColumns]     = useState(3);
+  const [gridWidth, setGridWidth] = useState(0);
+
+  // ResizeObserver measures the container to derive column count and column width.
+  // Done in useEffect to avoid setState-during-render warnings.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      const w = Math.floor(entry.contentRect.width);
+      setGridWidth(w);
+      setColumns(Math.max(1, Math.floor(w / MIN_COLUMN_WIDTH)));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const colWidth = gridWidth > 0 ? Math.floor(gridWidth / columns) : MIN_COLUMN_WIDTH;
+  const rowCount = Math.ceil(images.length / columns);
+
+  // cellProps are spread directly onto each Cell by react-window v2
+  const cellProps = { images, columns, selectedIds, onToggleSelect, onImageClick, onDownload };
 
   return (
     <div className="gallery-wrapper">
@@ -53,40 +83,24 @@ export default function Gallery({
         />
       )}
 
-      <div className="gallery-container">
-        {/* AutoSizer measures the container and passes exact pixel dimensions */}
-        <AutoSizer disableHeight style={{ width: '100%' }}>
-          {({ width }) => {
-            const cols     = Math.max(1, Math.floor(width / MIN_COLUMN_WIDTH));
-            const colWidth = Math.floor(width / cols);
-            const rowCount = Math.ceil(images.length / cols);
-
-            // Keep columns state in sync (triggers re-render of Cell fn only)
-            if (cols !== columns) setColumns(cols);
-
-            return (
-              <Grid
-                columnCount={cols}
-                columnWidth={colWidth}
-                height={window.innerHeight - 120}
-                rowCount={rowCount}
-                rowHeight={CARD_HEIGHT}
-                width={width}
-                overscanRowCount={OVERSCAN}
-                itemData={{
-                  images,
-                  columns: cols,
-                  selectedIds,
-                  onToggleSelect,
-                  onImageClick,
-                  onDownload,
-                }}
-              >
-                {Cell}
-              </Grid>
-            );
-          }}
-        </AutoSizer>
+      {/* gallery-container must have an explicit height for the Grid to scroll */}
+      <div
+        className="gallery-container"
+        ref={containerRef}
+        style={{ height: `calc(100vh - 120px)` }}
+      >
+        {gridWidth > 0 && (
+          <Grid
+            cellComponent={Cell}
+            cellProps={cellProps}
+            columnCount={columns}
+            columnWidth={colWidth}
+            rowCount={rowCount}
+            rowHeight={CARD_HEIGHT}
+            overscanCount={2}
+            style={{ width: '100%', height: '100%' }}
+          />
+        )}
       </div>
     </div>
   );

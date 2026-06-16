@@ -38,10 +38,10 @@ export default function ImageModal({ item, onClose }) {
         </button>
         <img
           src={item.downloadUrl}
-          alt={item.title}
+          alt={item.author}
           className="modal-image"
         />
-        <div className="modal-caption">{item.title}</div>
+        <div className="modal-caption">Photo by {item.author}</div>
       </div>
     </div>
   );
