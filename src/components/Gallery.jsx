@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, memo } from 'react';
 import { Grid } from 'react-window';
 import ImageCard from './ImageCard';
 import BottomTray from './BottomTray';
+import { getOrCacheImageMetadata } from '../cache/imageCache';
 
 /**
  * Gallery — virtualized image grid using react-window v2 Grid.
@@ -31,7 +32,7 @@ const Cell = memo(function Cell({
   const index = rowIndex * columns + columnIndex;
   if (index >= images.length) return <div style={style} />;
 
-  const item = images[index];
+  const item = getOrCacheImageMetadata(images[index]);
   return (
     <div style={{ ...style, padding: '8px', boxSizing: 'border-box' }}>
       <ImageCard
